@@ -1,4 +1,7 @@
 import re
+import urllib2
+import base64
+import json
 from buildbot.steps.shell import ShellCommand, WithProperties, Compile
 from buildbot.status.builder import FAILURE, SUCCESS, WARNINGS
 
@@ -86,7 +89,9 @@ class BuiltTest(PythonCommand):
     descriptionDone = ["test"]
     logfiles = {"test.log": "_trial_temp/test.log"}
 
-    def __init__(self, test_suite=None, *args, **kwargs):
+    def __init__(self, test_suite=None, user=None, password=None, *args, **kwargs):
+        self.user = user
+        self.password = password
         python_command = ["setup.py", "test", "--reporter=timing"]
         if test_suite is not None:
             python_command.extend(["--suite", test_suite])
@@ -120,6 +125,51 @@ class BuiltTest(PythonCommand):
             timings = "\n".join(["%7s seconds: %s" % (("%.3f" % t[0]), t[1])
                                  for t in tests]) + "\n"
             self.addCompleteLog("timings", timings)
+            if self.user:
+                self.uploadResults(tests, log)
+
+    def uploadResults(self, tests, log):
+        name = self.getSlaveName()
+        results = {}
+        total_time = 0
+        for t in tests:
+            key = t[1]
+            val = float("%.3f" % t[0])
+            total_time += val
+            results[key] = val
+        r = re.compile(r'^allmydata-tahoe: \d\.\d+\.\d+\.\S+ \[(\S+): (\S+)\]')
+        for line in log.readlines():
+            m = r.search(line)
+            if m:
+                break
+        m = m.group().replace('[','').replace(']','').replace(':', '')
+        m = m.split()
+        branch = m[-2]
+        git_revision = m[-1]
+        doc = {
+            'slave': name,
+            'tests': results,
+            'total_time': total_time,
+            'branch': branch,
+            'git_revision': git_revision
+        }
+        host = "http://tahoelafs.iriscouch.com/unit_tests"
+        request = urllib2.Request(host, data=json.dumps(doc))
+        base64string = base64.encodestring('%s:%s' % (self.user,  self.password)).replace('\n', '')
+        request.add_header('Authorization', 'Basic %s' % base64string)
+        request.add_header('Content-type', 'application/json')
+        try:
+            url = urllib2.urlopen(request)
+            code = url.getcode()
+            if code != 201:
+                warning = 'Results were not uploaded to IrisCouch. Received %d status instead of 201' % code
+                self.addCompleteLog('warnings', warning)
+        except Exception as e:
+            warning = 'Received warning when posting results to IrisCouch.\n'
+            warning += 'Exception: [%d] %s\n' % (e.errno, e.strerror)
+            self.addCompleteLog('warnings', warning)
+
+
 
 class TestOldDep(PythonCommand):
     """
